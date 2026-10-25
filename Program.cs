@@ -31,7 +31,7 @@ List<object> newMessages = new List<object>
     }
 };
 
-object[] newTools = new[]
+object[] newTools = new object[]
 {
     new
     {
@@ -55,13 +55,31 @@ object[] newTools = new[]
                 required = new[] { "id" }
             }
         }
+    },
+
+    new
+    {
+        type = "function",
+        function = new
+        {
+            name = "GetAllEquipments",
+            description = "모든 장비 정보를 검색합니다.",
+            parameters = new
+            {
+                type = "object",
+                properties = new { },
+                required = Array.Empty<string>()
+            }
+        }
     }
 };
 
 using HttpClient client = new HttpClient();
 client.Timeout = TimeSpan.FromSeconds(30);
 
-const int MAX_ITERATIONS = 5;
+const int MAX_ITERATIONS = 20;
+const int MAX_AGENT_ITERATIONS = 5;
+
 for (int i = 0; i < MAX_ITERATIONS; i++)
 {
     Console.WriteLine($"{i + 1}번째 질문을 입력하세요.");
@@ -84,7 +102,14 @@ for (int i = 0; i < MAX_ITERATIONS; i++)
     Console.WriteLine("질문을 처리중입니다...");
     Console.WriteLine();
 
-    using HttpResponseMessage response = await client.PostAsJsonAsync(
+    string? answer = null;
+    bool isCompleted = false;
+
+    for (int j = 0; j < MAX_AGENT_ITERATIONS; j++)
+    {
+        Console.WriteLine($"Agent Loop {j + 1}회");
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync(
 
         "http://localhost:11434/api/chat",
         new
@@ -96,27 +121,33 @@ for (int i = 0; i < MAX_ITERATIONS; i++)
             stream = false,
             think = false
         }
-    );
 
-    // 응답이 실패하면 예외를 일으키는 함수
-    response.EnsureSuccessStatusCode();
-    // Console.WriteLine($"{response.ToString()}");
+        );
 
-    string json = await response.Content.ReadAsStringAsync();
-    // Console.WriteLine($"응답 JSON : {json}");
+        // 응답이 실패하면 예외를 일으키는 함수
+        response.EnsureSuccessStatusCode();
+        // Console.WriteLine($"{response.ToString()}");
 
-    using JsonDocument document = JsonDocument.Parse(json);
+        string json = await response.Content.ReadAsStringAsync();
+        // Console.WriteLine($"응답 JSON : {json}");
 
-    JsonElement root = document.RootElement;
+        using JsonDocument document = JsonDocument.Parse(json);
 
-    string? answer = null;
+        JsonElement root = document.RootElement;
 
-    JsonElement assistantMessage = root.GetProperty("message");
+        JsonElement assistantMessage = root.GetProperty("message");
 
-    newMessages.Add(assistantMessage.Clone());
+        newMessages.Add(assistantMessage.Clone());
 
-    if (assistantMessage.TryGetProperty("tool_calls",out JsonElement toolCalls) && toolCalls.GetArrayLength() > 0)
-    {
+        if (assistantMessage.TryGetProperty("tool_calls", out JsonElement toolCalls) == false ||
+         toolCalls.ValueKind != JsonValueKind.Array ||
+         toolCalls.GetArrayLength() == 0)
+        {
+            answer = assistantMessage.GetProperty("content").GetString();
+            isCompleted = true;
+            break;
+        }
+
         foreach (JsonElement toolCall in toolCalls.EnumerateArray())
         {
             JsonElement function = toolCall.GetProperty("function");
@@ -126,7 +157,7 @@ for (int i = 0; i < MAX_ITERATIONS; i++)
 
             string result;
 
-            if(name == "GetEquipmentById")
+            if (name == "GetEquipmentById")
             {
                 JsonDocument argumentDoc = JsonDocument.Parse(argument);
                 int id = argumentDoc.RootElement.GetProperty("id").GetInt32();
@@ -142,7 +173,7 @@ for (int i = 0; i < MAX_ITERATIONS; i++)
                         Status = equipment.Status.ToString(),
                         equipment.Temperature,
                         equipment.AlarmCode
-                        
+
                     });
                 }
                 else
@@ -151,6 +182,38 @@ for (int i = 0; i < MAX_ITERATIONS; i++)
                     {
                         Error = "장비를 찾을 수 없습니다."
                     });
+                }
+            }
+            else if (name == "GetAllEquipments")
+            {
+                var equipments = equipmentManager.GetAllEquipments();
+
+                result = String.Empty;
+
+                foreach (var equipment in equipments)
+                {
+                    var equipmentJson = JsonSerializer.Serialize(new
+                    {
+                        equipment.Id,
+                        equipment.Name,
+                        Status = equipment.Status.ToString(),
+                        equipment.Temperature,
+                        equipment.AlarmCode
+                    });
+
+                    if (result == String.Empty)
+                    {
+                        result = "[" + equipmentJson;
+                    }
+                    else
+                    {
+                        result += "," + equipmentJson;
+                    }
+                }
+
+                if (result != String.Empty)
+                {
+                    result += "]";
                 }
             }
             else
@@ -172,29 +235,31 @@ for (int i = 0; i < MAX_ITERATIONS; i++)
             });
         }
 
-        using HttpResponseMessage finalResponse = await client.PostAsJsonAsync(
-            "http://localhost:11434/api/chat",
-            new
-            {
-                model = "qwen3.5:4b",
-                messages = newMessages,
-                stream = false,
-                think = false
-            }
-        );
+        // using HttpResponseMessage finalResponse = await client.PostAsJsonAsync(
+        //     "http://localhost:11434/api/chat",
+        //     new
+        //     {
+        //         model = "qwen3.5:4b",
+        //         messages = newMessages,
+        //         stream = false,
+        //         think = false
+        //     }
+        // );
 
-        finalResponse.EnsureSuccessStatusCode();
+        // finalResponse.EnsureSuccessStatusCode();
 
-        string finalJson = await finalResponse.Content.ReadAsStringAsync();
+        // string finalJson = await finalResponse.Content.ReadAsStringAsync();
 
-        using JsonDocument finalDocument = JsonDocument.Parse(finalJson);
+        // using JsonDocument finalDocument = JsonDocument.Parse(finalJson);
 
-        answer = finalDocument.RootElement.GetProperty("message").GetProperty("content").GetString();
-
+        // answer = finalDocument.RootElement.GetProperty("message").GetProperty("content").GetString();
     }
-    else
+
+    // 최대 반복 횟수를 초과한 경우
+    if (!isCompleted)
     {
-        answer = assistantMessage.GetProperty("content").GetString();
+        Console.WriteLine("Agent 최대 반복 횟수에 도달했습니다.");
+        break;
     }
 
     Console.WriteLine();
@@ -205,18 +270,11 @@ for (int i = 0; i < MAX_ITERATIONS; i++)
     // Console.WriteLine($"전체 : {total}");
     // Console.WriteLine();
 
-    double totalSeconds = root.GetProperty("total_duration").GetDouble() / 1_000_000_000.0;
-    double loadSeconds = root.GetProperty("load_duration").GetDouble() / 1_000_000_000.0;
+    // double totalSeconds = root.GetProperty("total_duration").GetDouble() / 1_000_000_000.0;
+    // double loadSeconds = root.GetProperty("load_duration").GetDouble() / 1_000_000_000.0;
 
-    Console.WriteLine($"전체 소요 시간 : {totalSeconds:F2}초");
-    Console.WriteLine($"모델 로딩 시간 : {loadSeconds:F2}초");
-    Console.WriteLine();
+    // Console.WriteLine($"전체 소요 시간 : {totalSeconds:F2}초");
+    // Console.WriteLine($"모델 로딩 시간 : {loadSeconds:F2}초");
+    // Console.WriteLine();
 
-}
-
-Console.WriteLine("대화 내역");
-
-foreach (object message in newMessages)
-{
-    Console.WriteLine($"{((dynamic)message).role}: {((dynamic)message).content}");
 }
